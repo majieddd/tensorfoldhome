@@ -160,6 +160,9 @@ doesn't wake the model", wake on demand and model-name rewriting, streams with a
 shared sampling, the per-request stats, totals, history and per-version performance log, live state and client
 disconnects, concurrent requests, idle unload and "keep loaded", and the API key on the network.
 
+`--update-check` runs the real TensorFold Home release check and writes `logs/update-check.txt`; `--update-download`
+also downloads the release's zip and verifies its SHA-256, app identity and version, staging nothing.
+
 Other flags: `--minimized` (start in the menu bar), `--no-start` (don't start TensorFold on launch),
 `--tab chat|monitor|about|server`, `--theme light|dark|system`, `--size WxH`, and `--probe` (writes what the app found
 to `logs/probe.txt`, including whether the header gets its clicks). For screenshots there's `--screenshot <png>` with

@@ -161,4 +161,38 @@ enum SelfTest {
         try? text.write(to: Paths.logs.appendingPathComponent("selftest.txt"), atomically: true, encoding: .utf8)
         return failed == 0 ? 0 : 1
     }
+
+    /// --update-check: the real release check against GitHub (read-only). --update-download also downloads the
+    /// release asset and verifies its SHA-256 and bundle, staging nothing. Writes logs/update-check.txt.
+    static func updateCheck(download: Bool) -> Int32 {
+        var out: [String] = ["TensorFold Home \(AppModel.version) update check, \(ISO8601DateFormatter().string(from: Date()))"]
+        var code: Int32 = 0
+        var done = false
+        Task {
+            let (info, why) = await SelfUpdater.fetchLatest()
+            if let info {
+                let latest = SelfUpdater.normalize(info.tag)
+                out.append("release \(info.tag): \(info.url)")
+                out.append("published sha256: \(info.sha256.isEmpty ? "none" : info.sha256)")
+                out.append("installed \(AppModel.version), latest \(latest): "
+                           + (SelfUpdater.compare(latest, AppModel.version) > 0 ? "update available" : "up to date"))
+                if download {
+                    let (app, msg) = await SelfUpdater.download(info, stage: false)
+                    out.append("download: \(app == nil ? "REFUSED " : "")\(msg)")
+                    if app == nil { code = 1 }
+                }
+            } else {
+                out.append("check failed: \(why ?? "unknown")")
+                code = 1
+            }
+            done = true
+        }
+        // the work above runs on the main actor, so spin the main run loop until it is done
+        while !done { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let text = out.joined(separator: "\n") + "\n"
+        print(text, terminator: "")
+        Paths.ensure()
+        try? text.write(to: Paths.logs.appendingPathComponent("update-check.txt"), atomically: true, encoding: .utf8)
+        return code
+    }
 }

@@ -4,6 +4,8 @@ import SwiftUI
 /// What was asked on the command line (the same flags StrataHome has, where they make sense on a Mac).
 struct Options {
     var minimized = false, noStart = false, drawer = false, selftest = false, probe = false
+    var updateCheck = false, updateDownload = false
+    var updateTest: [String]?            // URL SHA256 VERSION
     var tab: Tab?
     var theme: String?
     var size: CGSize?
@@ -23,6 +25,10 @@ struct Options {
             case "--drawer": o.drawer = true
             case "--selftest": o.selftest = true
             case "--probe": o.probe = true
+            case "--update-check": o.updateCheck = true
+            case "--update-download": o.updateCheck = true; o.updateDownload = true
+            case "--update-test":
+                if let u = next(), let s = next(), let v = next() { o.updateTest = [u, s, v]; o.minimized = true; o.noStart = true }
             case "--tab": o.tab = next().flatMap { Tab(rawValue: $0) }
             case "--theme": o.theme = next()
             case "--size":
@@ -49,6 +55,9 @@ enum Main {
             Fonts.register()
             exit(MainActor.assumeIsolated { SelfTest.run() })
         }
+        if opts.updateCheck {
+            exit(MainActor.assumeIsolated { SelfTest.updateCheck(download: opts.updateDownload) })
+        }
         let app = NSApplication.shared
         let d = MainActor.assumeIsolated { AppDelegate(opts) }
         delegate = d
@@ -74,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Fonts.register()
         Paths.ensure()
         Paths.diag("TensorFold Home \(AppModel.version) started" + (CommandLine.arguments.count > 1 ? " with \(CommandLine.arguments.dropFirst().joined(separator: " "))" : ""))
-        if opts.screenshot != nil || opts.probe { model.persist = false }
+        if opts.screenshot != nil || opts.probe || opts.updateTest != nil { model.persist = false }
         if let t = opts.theme { model.settings.theme = t }
         if let t = opts.tab { model.tab = t }
         model.applyAppearance()
@@ -97,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Task { await model.autoStartIfWanted(noStart: opts.noStart || opts.screenshot != nil || opts.probe) }
         if opts.screenshot != nil { scheduleScreenshot() }
         if opts.probe { scheduleProbe() }
+        if let t = opts.updateTest { runUpdateTest(url: t[0], sha: t[1], version: t[2]) }
     }
 
     // MARK: window
@@ -356,6 +366,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let text = out.joined(separator: "\n") + "\n"
             print(text, terminator: "")
             try? text.write(to: Paths.logs.appendingPathComponent("probe.txt"), atomically: true, encoding: .utf8)
+            NSApp.terminate(nil)
+        }
+    }
+
+    // MARK: --update-test URL SHA VERSION: update this copy from a local server, swap on quit, don't reopen
+
+    func runUpdateTest(url: String, sha: String, version: String) {
+        let up = model.updater
+        up.checkOverride = { ReleaseInfo(tag: version, url: url, sha256: sha) }
+        up.reopenAfterSwap = false
+        Task {
+            up.checkNow()
+            while up.checking { try? await Task.sleep(nanoseconds: 100_000_000) }
+            Paths.diag("[update-test] available=\(up.available) latest=\(up.latest)")
+            up.updateNow()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            while up.busy { try? await Task.sleep(nanoseconds: 100_000_000) }
+            Paths.diag("[update-test] staged=\(up.staged): \(up.status)")
             NSApp.terminate(nil)
         }
     }

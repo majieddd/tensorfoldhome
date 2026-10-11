@@ -24,6 +24,7 @@ final class SelfUpdater: ObservableObject {
     private unowned let model: AppModel
     private var nextCheck = Date().addingTimeInterval(20)
     var checkOverride: (() async -> ReleaseInfo?)?     // tests
+    var reopenAfterSwap = true                         // tests swap without opening the new copy
 
     static var pendingFile: URL { Paths.updates.appendingPathComponent("app-pending.json") }
 
@@ -142,7 +143,7 @@ final class SelfUpdater: ObservableObject {
 
     /// Download the zip, check its SHA-256 against the release digest, unpack it and check the bundle. Returns the
     /// staged .app path, or nil with the reason.
-    static func download(_ info: ReleaseInfo?) async -> (String?, String) {
+    static func download(_ info: ReleaseInfo?, stage: Bool = true) async -> (String?, String) {
         guard let info, let url = URL(string: info.url) else { return (nil, "The release has no \(asset) to download.") }
         guard !info.sha256.isEmpty else {
             return (nil, "The release publishes no SHA-256 for \(asset), so the download cannot be verified. Nothing was staged.")
@@ -173,6 +174,14 @@ final class SelfUpdater: ObservableObject {
         let plist = NSDictionary(contentsOfFile: appPath + "/Contents/Info.plist")
         guard plist?["CFBundleIdentifier"] as? String == AppModel.bundleID else {
             return (nil, "The downloaded app is not TensorFold Home. Nothing was staged.")
+        }
+        let bundleVersion = plist?["CFBundleShortVersionString"] as? String ?? ""
+        guard compare(bundleVersion, version) == 0 else {
+            return (nil, "The downloaded app says it is \(bundleVersion), the release says \(version). Nothing was staged.")
+        }
+        if !stage {
+            try? fm.removeItem(at: dir)
+            return (appPath, "verified: SHA-256 \(info.sha256), TensorFold Home \(bundleVersion); nothing staged")
         }
         let pending = ["app": appPath, "version": version]
         guard let data = try? JSONSerialization.data(withJSONObject: pending), (try? data.write(to: pendingFile)) != nil else {
@@ -215,7 +224,8 @@ final class SelfUpdater: ObservableObject {
         rm -rf \(q(current)) && /usr/bin/ditto \(q(p.app)) \(q(current)) || { /usr/bin/ditto \(q(backup + "/" + (current as NSString).lastPathComponent)) \(q(current)); exit 1; }
         /usr/bin/xattr -dr com.apple.quarantine \(q(current)) 2>/dev/null
         rm -f \(q(Self.pendingFile.path))
-        /usr/bin/open \(q(current))
+        rm -rf \(q((p.app as NSString).deletingLastPathComponent))
+        \(reopenAfterSwap ? "/usr/bin/open \(q(current))" : "true")
         """
         let p2 = Process()
         p2.executableURL = URL(fileURLWithPath: "/bin/bash")
