@@ -1,0 +1,27 @@
+#!/bin/bash
+# launchd entry point for Open WebUI, wired to the TensorFold endpoint gateway.
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/tf-common.sh"
+load_config
+trim_log "$LOGS/webui.log"
+
+export DATA_DIR="$ROOT/webui-data"
+export WEBUI_SECRET_KEY="$(cat "$STATE/webui_secret")"
+export WEBUI_AUTH=False                      # single local user, no login screen
+export ENABLE_OLLAMA_API=False
+export OPENAI_API_BASE_URL="http://127.0.0.1:$GATEWAY_PORT/v1"
+export OPENAI_API_KEY="tensorfold-local"     # the loopback gateway needs no key; Open WebUI wants a value
+export DEFAULT_MODELS="$SERVED_NAME"
+# Background generations queue behind your chat on a single local model; keep only titles.
+export ENABLE_AUTOCOMPLETE_GENERATION=False
+export ENABLE_FOLLOW_UP_GENERATION=False
+export ENABLE_TAGS_GENERATION=False
+export ENABLE_EVALUATION_ARENA_MODELS=False
+# Open WebUI attaches ~39 built-in tool schemas (~7K tokens) to every chat; too heavy for a local 9B model.
+# Re-enable per model in Workspace > Models > Capabilities. (Saved into the database on first start.)
+export DEFAULT_MODEL_METADATA='{"capabilities": {"builtin_tools": false}}'
+export ANONYMIZED_TELEMETRY=False DO_NOT_TRACK=True SCARF_NO_ANALYTICS=True
+
+cd "$DATA_DIR"
+echo "tf-webui: $(date '+%F %T') starting Open WebUI on 127.0.0.1:$WEBUI_PORT"
+exec "$ROOT/venv-webui/bin/open-webui" serve --host 127.0.0.1 --port "$WEBUI_PORT"

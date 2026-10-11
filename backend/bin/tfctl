@@ -1,0 +1,251 @@
+#!/bin/bash
+# tfctl — control TensorFold Home's backend (engine, endpoint gateway, Open WebUI, updater) from Terminal.
+set -uo pipefail
+source "$(dirname "$(readlink -f "$0")")/tf-common.sh"
+load_config
+
+ENGINE_LABEL=com.tensorfold.engine
+WEBUI_LABEL=com.tensorfold.webui
+GATEWAY_LABEL=com.tensorfold.gateway
+UPDATER_LABEL=com.tensorfold.updater
+AGENTS="$HOME/Library/LaunchAgents"
+
+usage() {
+  cat <<EOF
+usage: tfctl COMMAND
+
+  up [--no-ui]          start the endpoint, warm the engine, start Open WebUI
+  down                  stop Open WebUI and the engine (the endpoint stays if ENDPOINT_AT_LOGIN=1)
+  status [--json]       show what is running
+  open [chat|dashboard] open Open WebUI (waits for it) or the engine dashboard
+  use MODEL             switch model (restarts the engine if it is running)
+  models                list models from models.conf
+  thinking on|off       default reasoning mode
+  idle MINUTES          stop the engine after this many idle minutes (0 = never)
+  mode always|idle|ondemand [MINUTES]
+                        keep the model loaded / unload when idle / load on first request (and unload when idle)
+  share on|off          serve the endpoint to other computers on the network (restarts the endpoint)
+  key on|off|generate|show
+                        require an API key from other computers (this Mac never needs it)
+  autoupdate on|off     the daily TensorFold + Open WebUI update
+  engine start|stop|restart [--no-wait]
+  webui start|stop|restart
+  gateway start|stop|restart
+  login on|off          keep the endpoint gateway running from login
+  update [--check]      update TensorFold and Open WebUI now
+  endpoint              print connection details for Hermes and other clients
+  logs [engine|webui|gateway|update]
+  install-agents        (re)write launchd agents after editing config.env
+EOF
+}
+
+new_key() { printf 'sk-tf-%s\n' "$(openssl rand -hex 20)"; }
+
+plist_path() { # plist_path LABEL
+  case $1 in
+    "$GATEWAY_LABEL") [[ $ENDPOINT_AT_LOGIN == 1 ]] && echo "$AGENTS/$1.plist" || echo "$ROOT/launchd/$1.plist" ;;
+    "$UPDATER_LABEL") echo "$AGENTS/$1.plist" ;;
+    *) echo "$ROOT/launchd/$1.plist" ;;
+  esac
+}
+
+write_plist() { # write_plist LABEL PROGRAM LOG KEEPALIVE(crash|always) [extra xml]
+  local label=$1 program=$2 log=$3 keep=$4 extra=${5:-} file
+  file=$(plist_path "$label")
+  mkdir -p "$(dirname "$file")"
+  local keepxml='<dict><key>SuccessfulExit</key><false/></dict>'
+  [[ $keep == always ]] && keepxml='<true/>'
+  [[ $keep == none ]] && keepxml='<false/>'
+  cat >"$file" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array>$program</array>
+  <key>RunAtLoad</key><$([[ $keep == none ]] && echo false || echo true)/>
+  <key>KeepAlive</key>$keepxml
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$PATH</string>
+    <key>TF_LAUNCHER_ROOT</key><string>$ROOT</string>
+  </dict>
+  $extra
+</dict>
+</plist>
+EOF
+}
+
+install_agents() {
+  write_plist $ENGINE_LABEL "<string>/bin/bash</string><string>$ROOT/bin/tf-engine</string>" "$LOGS/engine.log" crash
+  write_plist $WEBUI_LABEL "<string>/bin/bash</string><string>$ROOT/bin/tf-webui</string>" "$LOGS/webui.log" crash
+  rm -f "$AGENTS/$GATEWAY_LABEL.plist" "$ROOT/launchd/$GATEWAY_LABEL.plist"
+  write_plist $GATEWAY_LABEL "<string>$ROOT/venv-tf06/bin/python</string><string>$ROOT/bin/tf-gateway.py</string>" "$LOGS/gateway.log" always
+  write_plist $UPDATER_LABEL "<string>/bin/bash</string><string>$ROOT/bin/tf-update</string><string>--auto</string>" "$LOGS/update.log" none \
+    "<key>StartCalendarInterval</key><dict><key>Hour</key><integer>$UPDATE_HOUR</integer><key>Minute</key><integer>$UPDATE_MINUTE</integer></dict>
+  <key>ProcessType</key><string>Background</string><key>LowPriorityIO</key><true/>"
+  # the updater runs daily when AUTO_UPDATE=1; the gateway runs from login only with ENDPOINT_AT_LOGIN=1
+  launchctl bootout "$DOMAIN/$UPDATER_LABEL" 2>/dev/null
+  if [[ $AUTO_UPDATE == 1 ]]; then launchctl bootstrap "$DOMAIN" "$(plist_path $UPDATER_LABEL)"; else rm -f "$(plist_path $UPDATER_LABEL)"; fi
+}
+
+svc_start() { # svc_start LABEL
+  is_loaded "$1" && return 0
+  [[ -f $(plist_path "$1") ]] || install_agents
+  launchctl bootstrap "$DOMAIN" "$(plist_path "$1")"
+}
+svc_stop() { is_loaded "$1" && launchctl bootout "$DOMAIN/$1" 2>/dev/null; return 0; }
+
+wait_for() { # wait_for URL SECONDS
+  local deadline=$((SECONDS + $2))
+  while ((SECONDS < deadline)); do http_ok "$1" && return 0; sleep 0.5; done
+  return 1
+}
+
+webui_installed() { [[ -x $ROOT/venv-webui/bin/open-webui ]]; }
+engine_up() { http_ok "http://127.0.0.1:$ENGINE_PORT/health"; }
+webui_up() { http_ok "http://127.0.0.1:$WEBUI_PORT/health"; }
+gateway_up() { http_ok "http://127.0.0.1:$GATEWAY_PORT/health"; }
+
+engine_cmd() {
+  case ${1:-} in
+    start)
+      svc_start $ENGINE_LABEL
+      [[ ${2:-} == --no-wait ]] && return 0
+      echo "starting $(model_field "$MODEL" 2)…"
+      wait_for "http://127.0.0.1:$ENGINE_PORT/health" 300 && echo "engine ready" || { echo "engine did not become ready; see $LOGS/engine.log" >&2; return 1; } ;;
+    stop) svc_stop $ENGINE_LABEL; echo "engine stopped" ;;
+    restart) svc_stop $ENGINE_LABEL; sleep 1; engine_cmd start "${2:-}" ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+simple_cmd() { # simple_cmd LABEL URL ACTION
+  case ${3:-} in
+    start) svc_start "$1" && wait_for "$2" 180 ;;
+    stop) svc_stop "$1" ;;
+    restart) svc_stop "$1"; sleep 1; svc_start "$1" && wait_for "$2" 180 ;;
+    *) usage; return 2 ;;
+  esac
+}
+
+cmd_status() {
+  if [[ ${1:-} == --json ]]; then
+    /usr/bin/curl -fsS --max-time 3 "http://127.0.0.1:$GATEWAY_PORT/tf/status" 2>/dev/null ||
+      echo "{\"gateway\":\"stopped\",\"engine\":\"$(engine_up && echo running || echo stopped)\",\"webui\":\"$(webui_up && echo running || echo stopped)\"}"
+    return
+  fi
+  printf 'model     %s (%s)\n' "$(model_field "$MODEL" 2)" "$MODEL"
+  printf 'endpoint  http://127.0.0.1:%s/v1  model id "%s"  context %s  [%s]\n' "$GATEWAY_PORT" "$SERVED_NAME" "$CONTEXT" "$(gateway_up && echo up || echo down)"
+  printf 'engine    %s (memory mode %s, idle %s min)\n' "$(engine_up && echo running || echo stopped)" "$MEMORY_MODE" "$IDLE_MINUTES"
+  printf 'chat      http://127.0.0.1:%s  [%s]\n' "$WEBUI_PORT" "$(webui_installed || { echo not installed; exit; }; webui_up && echo up || echo down)"
+  printf 'thinking  %s\n' "$THINKING"
+  [[ -f $STATE/update.json ]] && printf 'updates   %s\n' "$(/usr/bin/python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("summary",""), "·", d.get("checked_at",""))' "$STATE/update.json" 2>/dev/null)"
+  return 0
+}
+
+cmd=${1:-status}; shift || true
+case $cmd in
+  up)
+    svc_start $GATEWAY_LABEL
+    [[ $MEMORY_MODE == ondemand ]] || engine_up || svc_start $ENGINE_LABEL # warm the model while the UI loads
+    [[ ${1:-} == --no-ui ]] || ! webui_installed || svc_start $WEBUI_LABEL
+    wait_for "http://127.0.0.1:$GATEWAY_PORT/health" 30 ;;
+  down)
+    svc_stop $WEBUI_LABEL; svc_stop $ENGINE_LABEL
+    [[ $ENDPOINT_AT_LOGIN == 1 ]] || svc_stop $GATEWAY_LABEL
+    echo "stopped" ;;
+  status) cmd_status "${1:-}" ;;
+  open)
+    case ${1:-chat} in
+      chat)
+        webui_installed || { echo "Open WebUI is not installed (install.sh --webui adds it)" >&2; exit 1; }
+        webui_up || { svc_start $GATEWAY_LABEL; svc_start $WEBUI_LABEL; }
+        wait_for "http://127.0.0.1:$WEBUI_PORT/health" 180 || { echo "Open WebUI did not start; see $LOGS/webui.log" >&2; exit 1; }
+        open "http://127.0.0.1:$WEBUI_PORT" ;;
+      dashboard) open "http://127.0.0.1:$GATEWAY_PORT/dashboard" ;;
+    esac ;;
+  use)
+    [[ -n ${1:-} ]] && model_line "$1" >/dev/null || { echo "unknown model '${1:-}'; try: tfctl models" >&2; exit 2; }
+    set_config MODEL "$1"; MODEL=$1
+    echo "model set to $(model_field "$1" 2)"
+    if is_loaded $ENGINE_LABEL; then engine_cmd restart "${2:-}"; fi ;;
+  models)
+    grep -v '^\s*#' "$ROOT/models.conf" | while IFS='|' read -r key label engine repo; do
+      [[ -z $key ]] && continue
+      printf '%s %-12s %-34s %-6s %s\n' "$([[ $key == "$MODEL" ]] && echo '*' || echo ' ')" "$key" "$label" "$engine" "$repo"
+    done ;;
+  thinking)
+    [[ ${1:-} == on || ${1:-} == off ]] || { echo "usage: tfctl thinking on|off" >&2; exit 2; }
+    set_config THINKING "$1"; echo "thinking $1"
+    if is_loaded $ENGINE_LABEL; then engine_cmd restart "${2:-}"; fi ;;
+  idle)
+    [[ ${1:-} =~ ^[0-9]+$ ]] || { echo "usage: tfctl idle MINUTES" >&2; exit 2; }
+    set_config IDLE_MINUTES "$1"; echo "engine stops after $1 idle minutes (0 = never)" ;;
+  mode)
+    case ${1:-} in
+      always) set_config MEMORY_MODE always ;;
+      idle | ondemand)
+        set_config MEMORY_MODE "$1"
+        [[ ${2:-} =~ ^[0-9]+$ ]] && set_config IDLE_MINUTES "$2"
+        load_config; ((IDLE_MINUTES > 0)) || set_config IDLE_MINUTES 10 ;;
+      *) echo "usage: tfctl mode always|idle|ondemand [MINUTES]" >&2; exit 2 ;;
+    esac
+    load_config; echo "memory mode $MEMORY_MODE (idle minutes $IDLE_MINUTES)" ;;
+  share)
+    [[ ${1:-} == on || ${1:-} == off ]] || { echo "usage: tfctl share on|off" >&2; exit 2; }
+    set_config SHARE_ON_NETWORK "$([[ $1 == on ]] && echo 1 || echo 0)"
+    if [[ $1 == on && ! -s $STATE/api_key ]]; then (umask 077; new_key >"$STATE/api_key"); fi
+    is_loaded $GATEWAY_LABEL && simple_cmd $GATEWAY_LABEL "http://127.0.0.1:$GATEWAY_PORT/health" restart >/dev/null
+    echo "network sharing $1" ;;
+  key)
+    case ${1:-show} in
+      on) set_config REQUIRE_KEY 1; [[ -s $STATE/api_key ]] || (umask 077; new_key >"$STATE/api_key") ;;
+      off) set_config REQUIRE_KEY 0 ;;
+      generate) (umask 077; new_key >"$STATE/api_key") ;;
+      show) cat "$STATE/api_key" 2>/dev/null; echo; exit 0 ;;
+      *) echo "usage: tfctl key on|off|generate|show" >&2; exit 2 ;;
+    esac
+    echo "API key required from other computers: $(grep -q '^REQUIRE_KEY=1' "$ROOT/config.env" && echo yes || echo no)" ;;
+  autoupdate)
+    [[ ${1:-} == on || ${1:-} == off ]] || { echo "usage: tfctl autoupdate on|off" >&2; exit 2; }
+    set_config AUTO_UPDATE "$([[ $1 == on ]] && echo 1 || echo 0)"; load_config
+    install_agents; echo "automatic updates $1" ;;
+  engine) engine_cmd "$@" ;;
+  webui)
+    [[ ${1:-} == stop ]] || webui_installed || { echo "Open WebUI is not installed (install.sh --webui adds it)" >&2; exit 1; }
+    simple_cmd $WEBUI_LABEL "http://127.0.0.1:$WEBUI_PORT/health" "${1:-}" ;;
+  gateway) simple_cmd $GATEWAY_LABEL "http://127.0.0.1:$GATEWAY_PORT/health" "${1:-}" ;;
+  login)
+    [[ ${1:-} == on || ${1:-} == off ]] || { echo "usage: tfctl login on|off" >&2; exit 2; }
+    running=0; is_loaded $GATEWAY_LABEL && running=1
+    svc_stop $GATEWAY_LABEL
+    set_config ENDPOINT_AT_LOGIN "$([[ $1 == on ]] && echo 1 || echo 0)"; load_config
+    install_agents
+    { [[ $1 == on ]] || ((running)); } && svc_start $GATEWAY_LABEL
+    echo "endpoint at login: $1" ;;
+  update) exec "$ROOT/bin/tf-update" "$@" ;;
+  endpoint)
+    cat <<EOF
+Base URL (OpenAI):     http://127.0.0.1:$GATEWAY_PORT/v1
+Base URL (Anthropic):  http://127.0.0.1:$GATEWAY_PORT
+Model id:              $SERVED_NAME   (any name works; it is rewritten)
+API key:               none needed on this Mac (send any value if a client insists)
+Context window:        $CONTEXT tokens
+Loaded model:          $(model_field "$MODEL" 2)
+
+Hermes (~/.hermes/config.yaml):
+  model:
+    provider: custom
+    base_url: http://127.0.0.1:$GATEWAY_PORT/v1
+    default: $SERVED_NAME
+    context_length: $CONTEXT
+EOF
+    ;;
+  logs) f="$LOGS/${1:-engine}.log"; [[ -f $f ]] && tail -n 60 "$f" || echo "no log at $f" ;;
+  install-agents) install_agents; echo "launchd agents written to $ROOT/launchd and $AGENTS" ;;
+  -h | --help | help) usage ;;
+  *) usage; exit 2 ;;
+esac

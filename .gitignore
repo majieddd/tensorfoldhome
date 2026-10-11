@@ -1,0 +1,6 @@
+# build output: the app zip is attached to GitHub Releases, not committed
+dist/
+*.log
+__pycache__/
+*.pyc
+.DS_Store

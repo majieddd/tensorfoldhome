@@ -1,0 +1,19 @@
+name: Build and checks
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Endpoint gateway tests (mock engine, no model)
+        run: python3 -m unittest discover -s tools -p test_gateway.py -v
+      - name: Backend scripts parse
+        run: for f in backend/bin/tfctl backend/bin/tf-update backend/bin/tf-engine backend/bin/tf-webui backend/install.sh; do bash -n "$f"; done
+      - name: Build
+        run: ./build.sh
+      - name: Self-test
+        run: '"dist/TensorFold Home.app/Contents/MacOS/TensorFoldHome" --selftest'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TensorFoldHome
+          path: dist/TensorFoldHome.zip

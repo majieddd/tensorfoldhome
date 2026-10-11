@@ -1,0 +1,148 @@
+#!/bin/bash
+# tf-update — update TensorFold 1.0.x (Homebrew), TensorFold 0.6.x (venv) and Open WebUI (if installed), with health checks.
+#   tf-update            update now (interactive)
+#   tf-update --check    only report what is out of date
+#   tf-update --auto     scheduled run (launchd): quiet unless something changed or failed
+# A failed TensorFold 0.6 or Open WebUI update is rolled back to the version that was installed before.
+set -uo pipefail
+source "$(dirname "$(readlink -f "$0")")/tf-common.sh"
+load_config
+mode=${1:-now}
+REPO_URL=https://github.com/ashhart/TensorFold.git
+TF06_PY="$ROOT/venv-tf06/bin/python"
+WEBUI_PY="$ROOT/venv-webui/bin/python"
+results=()  # "component|before|after|status"
+changed_native=0 changed_tf06=0 changed_webui=0 failed=0
+
+log() { echo "tf-update: $(date '+%F %T') $*"; }
+uvpip() { VIRTUAL_ENV="$1" uv pip "${@:2}"; }
+engine_type() { model_field "$MODEL" 3; }
+gateway_inflight() {
+  /usr/bin/curl -fsS --max-time 3 "http://127.0.0.1:$GATEWAY_PORT/tf/status" 2>/dev/null |
+    /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("inflight", 0))' 2>/dev/null || echo 0
+}
+
+# TensorFold 0.6 must import with the pieces the M5 workaround patches, and its CLI must run.
+tf06_healthy() {
+  [[ ${TF_UPDATE_SIMULATE_FAILURE:-} == tf06 ]] && return 1 # test hook for the rollback path
+  "$TF06_PY" -c 'import tensorfold.cli; from tensorfold.kernels import device; device.generation; device.tensor_units' 2>/dev/null &&
+    "$ROOT/venv-tf06/bin/tensorfold" --version >/dev/null 2>&1
+}
+webui_healthy() {
+  [[ ${TF_UPDATE_SIMULATE_FAILURE:-} == webui ]] && return 1
+  "$WEBUI_PY" -c 'import open_webui.main' >/dev/null 2>&1; }
+
+# --- TensorFold 1.0.x (Homebrew) ---------------------------------------------------------------
+native_before=$(brew list --versions tensorfold 2>/dev/null | awk '{print $2}')
+brew update --quiet >/dev/null 2>&1
+if brew outdated --quiet tensorfold 2>/dev/null | grep -q tensorfold; then
+  latest=$(brew info --json=v2 tensorfold 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])' 2>/dev/null)
+  if [[ $mode == --check ]]; then
+    results+=("tensorfold (brew)|$native_before|$latest|available")
+  else
+    log "upgrading Homebrew tensorfold $native_before -> $latest"
+    if brew upgrade tensorfold && tensorfold --version >/dev/null 2>&1; then
+      changed_native=1; results+=("tensorfold (brew)|$native_before|$(brew list --versions tensorfold | awk '{print $2}')|updated")
+    else
+      failed=1; results+=("tensorfold (brew)|$native_before|$latest|failed")
+    fi
+  fi
+else
+  results+=("tensorfold (brew)|$native_before|$native_before|current")
+fi
+
+# --- TensorFold 0.6.x (venv, python-0.6 branch) -------------------------------------------------
+tf06_req=$(uvpip "$ROOT/venv-tf06" freeze 2>/dev/null | grep -i '^tensorfold @')
+tf06_before=${tf06_req##*@}
+tf06_remote=$(git ls-remote "$REPO_URL" refs/heads/python-0.6 2>/dev/null | cut -f1)
+if [[ -n $tf06_remote && $tf06_remote != "$tf06_before" ]]; then
+  if [[ $mode == --check ]]; then
+    results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|available")
+  else
+    log "updating TensorFold 0.6 ${tf06_before:0:7} -> ${tf06_remote:0:7}"
+    if uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_remote" >/dev/null 2>&1 && tf06_healthy; then
+      changed_tf06=1; results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|updated")
+    else
+      log "TensorFold 0.6 update failed its health check; rolling back to ${tf06_before:0:7}"
+      uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
+      failed=1; results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|rolled back")
+    fi
+  fi
+else
+  results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_before:0:7}|current")
+fi
+
+# --- Open WebUI (optional) -----------------------------------------------------------------------
+if [[ ! -x $WEBUI_PY ]]; then
+  results+=("open-webui|||not installed")
+else
+webui_before=$("$WEBUI_PY" -c 'import importlib.metadata as m; print(m.version("open-webui"))' 2>/dev/null)
+webui_latest=$(/usr/bin/curl -fsS --max-time 15 https://pypi.org/pypi/open-webui/json 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null)
+if [[ -n $webui_latest && $webui_latest != "$webui_before" ]]; then
+  if [[ $mode == --check ]]; then
+    results+=("open-webui|$webui_before|$webui_latest|available")
+  else
+    log "updating Open WebUI $webui_before -> $webui_latest"
+    if uvpip "$ROOT/venv-webui" install "open-webui==$webui_latest" >/dev/null 2>&1 && webui_healthy; then
+      changed_webui=1; results+=("open-webui|$webui_before|$webui_latest|updated")
+    else
+      log "Open WebUI update failed its health check; rolling back to $webui_before"
+      uvpip "$ROOT/venv-webui" install "open-webui==$webui_before" >/dev/null 2>&1
+      failed=1; results+=("open-webui|$webui_before|$webui_latest|rolled back")
+    fi
+  fi
+else
+  results+=("open-webui|$webui_before|$webui_before|current")
+fi
+fi
+
+# --- Restart what changed, then verify -----------------------------------------------------------
+if [[ $mode != --check ]]; then
+  etype=$(engine_type)
+  if { [[ $etype == native ]] && ((changed_native)); } || { [[ $etype == tf06 ]] && ((changed_tf06)); }; then
+    if is_loaded com.tensorfold.engine; then
+      if [[ $(gateway_inflight) == 0 ]]; then
+        log "restarting the engine on the new version"
+        if ! "$ROOT/bin/tfctl" engine restart >/dev/null 2>&1; then
+          if [[ $etype == tf06 ]]; then
+            log "engine failed to start on the new TensorFold 0.6; rolling back to ${tf06_before:0:7}"
+            uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
+            "$ROOT/bin/tfctl" engine restart >/dev/null 2>&1
+            results+=("tensorfold 0.6 (venv)|${tf06_remote:0:7}|${tf06_before:0:7}|rolled back after failed start")
+          else
+            results+=("tensorfold (brew)|$native_before||engine failed to start on the new version")
+          fi
+          failed=1
+        fi
+      else
+        log "engine busy; the new version loads at its next start"
+      fi
+    fi
+  fi
+  if ((changed_webui)) && is_loaded com.tensorfold.webui; then
+    log "restarting Open WebUI"
+    "$ROOT/bin/tfctl" webui restart >/dev/null 2>&1 || failed=1
+  fi
+  if is_loaded com.tensorfold.gateway && ((changed_tf06)); then  # the gateway runs on the 0.6 venv's Python
+    "$ROOT/bin/tfctl" gateway restart >/dev/null 2>&1
+  fi
+fi
+
+# --- Report ---------------------------------------------------------------------------------------
+summary=$(printf '%s\n' "${results[@]}" | /usr/bin/python3 -c '
+import json, sys, datetime
+rows = [l.rstrip("\n").split("|") for l in sys.stdin if l.strip()]
+changed = [r for r in rows if r[3] not in ("current", "not installed")]
+summary = "everything up to date" if not changed else "; ".join(f"{r[0]} {r[1]}->{r[2]} {r[3]}" for r in changed)
+doc = {"checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "mode": sys.argv[1], "summary": summary,
+       "ok": sys.argv[2] == "0", "components": [dict(zip(("name", "before", "after", "status"), r)) for r in rows]}
+open(sys.argv[3], "w").write(json.dumps(doc, indent=1))
+print(summary)' "$mode" "$failed" "$STATE/update.json")
+
+log "$summary"
+for r in "${results[@]}"; do IFS='|' read -r n b a s <<<"$r"; printf '  %-22s %-10s %-10s %s\n' "$n" "$b" "$a" "$s"; done
+if [[ $mode == --auto ]]; then
+  ((failed)) && notify "Update problem: $summary"
+  ((changed_native || changed_tf06 || changed_webui)) && ((!failed)) && notify "Updated: $summary"
+fi
+exit $failed

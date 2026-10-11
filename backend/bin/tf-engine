@@ -1,0 +1,20 @@
+#!/bin/bash
+# launchd entry point for the TensorFold engine: serves the configured model on the internal port.
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/tf-common.sh"
+load_config
+trim_log "$LOGS/engine.log"
+
+line=$(model_line "$MODEL") || { echo "tf-engine: unknown model '$MODEL' (see models.conf)" >&2; exit 2; }
+IFS='|' read -r key label engine repo <<<"$line"
+
+args=(serve "$repo" --name "$SERVED_NAME" --alias "$key" --host 127.0.0.1 --port "$ENGINE_PORT"
+  --context "$CONTEXT" --no-update-check)
+if [[ $THINKING == on ]]; then args+=(--thinking); else args+=(--no-thinking); fi
+
+echo "tf-engine: $(date '+%F %T') starting $label ($engine) on 127.0.0.1:$ENGINE_PORT"
+case $engine in
+  native) exec /opt/homebrew/bin/tensorfold "${args[@]}" --dashboard ;;
+  tf06) exec "$ROOT/venv-tf06/bin/python" "$ROOT/bin/tf06_no_tensor_units.py" "${args[@]}" ;;
+  *) echo "tf-engine: unknown engine '$engine'" >&2; exit 2 ;;
+esac
