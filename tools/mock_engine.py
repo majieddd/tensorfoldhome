@@ -7,6 +7,7 @@ Every request body is written to RECORD_DIR/last_<path>.json. A prompt containin
 """
 import json
 import os
+import socketserver
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -121,4 +122,12 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b"0\r\n\r\n")
 
 
-ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):  # skip HTTPServer's reverse DNS lookup of the host name (slow on some networks)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+Server(("127.0.0.1", PORT), H).serve_forever()

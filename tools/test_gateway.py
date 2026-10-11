@@ -74,7 +74,8 @@ esac
         env = dict(os.environ, TF_LAUNCHER_ROOT=cls.root, TF_ENGINE_LABEL="com.tensorfold.test-none", TF_IDLE_CHECK_S="1")
         cls.gw_log = open(os.path.join(cls.root, "logs", "gateway.log"), "a")
         cls.gw = subprocess.Popen([sys.executable, GATEWAY], env=env, stdout=cls.gw_log, stderr=subprocess.STDOUT)
-        cls.wait(lambda: cls.get("/health")[0] == 200, 10)
+        if not cls.wait(lambda: cls.get("/health")[0] == 200, 30):
+            raise RuntimeError("the gateway did not answer /health within 30 s; see " + cls.gw_log.name)
 
     @classmethod
     def stop_gateway(cls):

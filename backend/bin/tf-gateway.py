@@ -17,6 +17,7 @@ import http.client
 import json
 import os
 import re
+import socketserver
 import subprocess
 import threading
 import time
@@ -875,6 +876,16 @@ def apply_defaults(doc, path):
 LISTEN_HOST = "127.0.0.1"
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer.server_bind looks up the host's name (socket.getfqdn), a reverse DNS query that can stall
+        # startup for half a minute on a network with slow DNS; nothing here uses the name.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
     global LISTEN_HOST
     cfg = read_config()
@@ -883,8 +894,7 @@ def main():
         ENGINE.on_up()
         ENGINE.was_up = True
     threading.Thread(target=ENGINE.poll_loop, daemon=True).start()
-    server = ThreadingHTTPServer((LISTEN_HOST, cfg["gateway_port"]), Handler)
-    server.daemon_threads = True
+    server = Server((LISTEN_HOST, cfg["gateway_port"]), Handler)
     print(f"tf-gateway: serving http://{LISTEN_HOST}:{cfg['gateway_port']}/v1 -> engine :{cfg['engine_port']}"
           f"{' (API key required from other computers)' if cfg['share'] and cfg['require_key'] and api_key() else ''}", flush=True)
     server.serve_forever()
