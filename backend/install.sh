@@ -38,8 +38,12 @@ tensorfold --version || true
 if [[ ! -x $ROOT/venv-tf06/bin/tensorfold ]]; then
   step "Installing TensorFold 0.6 (python-0.6 branch)"
   uv venv "$ROOT/venv-tf06" --python 3.12
-  VIRTUAL_ENV="$ROOT/venv-tf06" uv pip install "tensorfold @ git+$REPO_URL@python-0.6"
+  VIRTUAL_ENV="$ROOT/venv-tf06" uv pip install "tensorfold[grammar] @ git+$REPO_URL@python-0.6"
 fi
+# The grammar extra (xgrammar, with PyTorch, ~0.5 GB) lets requests ask for JSON-schema output, which Hermes and other
+# agents use (Hermes's chat titles, for one). Added to existing installs too.
+"$ROOT/venv-tf06/bin/python" -c 'import xgrammar' 2>/dev/null ||
+  { step "Adding structured-output support (xgrammar)"; VIRTUAL_ENV="$ROOT/venv-tf06" uv pip install "xgrammar>=0.2.8,<0.3"; }
 
 if ((WEBUI)) && [[ ! -x $ROOT/venv-webui/bin/open-webui ]]; then
   step "Installing Open WebUI"

@@ -65,6 +65,14 @@ model:
   context_length: 65536
 ```
 
+Tested with Hermes Agent 0.21.6 on an M5 with 24 GB: plain answers, terminal tool calls, and chat titles (which ask for
+JSON-schema output; Set up installs TensorFold's `grammar` extra for that). Hermes's prompt with its tools is about
+25,000 tokens. The first turn after the model loads reads all of it (about 36 s for a 9B). Later turns reuse it from the
+prompt cache and start answering in about half a second.
+
+Don't run a second local model server for Hermes at the same time (for example Hermes's own llama.cpp runtime with
+the GGUF copy of the same model): two 9B models don't fit in 24 GB together, and everything slows to a crawl.
+
 The first request after the model has been unloaded waits for it to load: about 35 s for a 9B model, 2 s for the 2B.
 Hermes's long system prompt (about 13,600 tokens) takes about 18 s to read the first time. After that it is answered
 from TensorFold's prompt cache in 0.4 to 5 s.

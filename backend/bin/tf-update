@@ -60,11 +60,11 @@ if [[ -n $tf06_remote && $tf06_remote != "$tf06_before" ]]; then
     results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|available")
   else
     log "updating TensorFold 0.6 ${tf06_before:0:7} -> ${tf06_remote:0:7}"
-    if uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_remote" >/dev/null 2>&1 && tf06_healthy; then
+    if uvpip "$ROOT/venv-tf06" install "tensorfold[grammar] @ git+$REPO_URL@$tf06_remote" >/dev/null 2>&1 && tf06_healthy; then
       changed_tf06=1; results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|updated")
     else
       log "TensorFold 0.6 update failed its health check; rolling back to ${tf06_before:0:7}"
-      uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
+      uvpip "$ROOT/venv-tf06" install "tensorfold[grammar] @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
       failed=1; results+=("tensorfold 0.6 (venv)|${tf06_before:0:7}|${tf06_remote:0:7}|rolled back")
     fi
   fi
@@ -106,7 +106,7 @@ if [[ $mode != --check ]]; then
         if ! "$ROOT/bin/tfctl" engine restart >/dev/null 2>&1; then
           if [[ $etype == tf06 ]]; then
             log "engine failed to start on the new TensorFold 0.6; rolling back to ${tf06_before:0:7}"
-            uvpip "$ROOT/venv-tf06" install "tensorfold @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
+            uvpip "$ROOT/venv-tf06" install "tensorfold[grammar] @ git+$REPO_URL@$tf06_before" >/dev/null 2>&1
             "$ROOT/bin/tfctl" engine restart >/dev/null 2>&1
             results+=("tensorfold 0.6 (venv)|${tf06_remote:0:7}|${tf06_before:0:7}|rolled back after failed start")
           else
