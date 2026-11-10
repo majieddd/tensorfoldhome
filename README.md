@@ -1,5 +1,12 @@
 # TensorFold Home
 
+> **Development has moved to [8gent](https://github.com/majieddd/8gent).** 8gent is one app for every
+> loader (TensorFold, uzu, llama.cpp, Ollama, LM Studio, Strata) with one endpoint, and it takes over
+> TensorFold Home's setup on its first run: the selected model, context window, network sharing and memory
+> mode, and it answers on TensorFold Home's port too. TensorFold Home keeps working as it is but gets no new versions.
+> To move: `tfctl login off`, `tfctl gateway stop`, `tfctl engine stop`, `tfctl autoupdate off`, then
+> install 8gent from https://downloads.kr8.app/8gent/.
+
 **An unofficial Mac app for [TensorFold](https://github.com/ashhart/TensorFold).** It runs TensorFold's local model
 server in the background and keeps one stable endpoint for Hermes and any other OpenAI- or Anthropic-compatible app.
 It gives you a native window in the style of [StrataHome](https://github.com/majieddd/stratahome): Chat, a live
