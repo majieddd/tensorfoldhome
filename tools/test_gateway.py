@@ -292,6 +292,46 @@ esac
             type(self).write_config()
             type(self).start_gateway()
 
+    def test_13_overflow_is_recorded_and_stays_standard(self):
+        before = self.get("/tf/status")[1]["overflows"].get("count", 0)
+        code, reply = self.post("/v1/chat/completions", self.chat(messages=[{"role": "user", "content": "OVERFLOW"}]))
+        self.assertEqual(code, 400)
+        self.assertEqual(reply["error"]["code"], "context_length_exceeded")
+        self.assertIn("rendered prompt has 70123 tokens", reply["error"]["message"])
+        o = self.get("/tf/status")[1]["overflows"]
+        self.assertEqual(o["count"], before + 1)
+        self.assertEqual(o["last_estimate"], 70123, "the engine's own count, not an estimate")
+        self.assertEqual(self.metrics()["requests"][0]["finish"], "overflow")
+
+    def test_14_stream_overflow_is_a_clean_400(self):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.gw_port}/v1/chat/completions",
+                                     data=json.dumps(self.chat(stream=True, messages=[{"role": "user", "content": "OVERFLOW"}])).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=30)
+        self.assertEqual(ctx.exception.code, 400)
+        body = json.loads(ctx.exception.read())
+        ctx.exception.close()
+        self.assertEqual(body["error"]["code"], "context_length_exceeded")
+
+    def test_15_slow_prefill_is_not_held_back(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.gw_port, timeout=30)
+        t0 = time.time()
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(self.chat(stream=True, messages=[{"role": "user", "content": "PREFILL5"}])),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        headers_after = time.time() - t0
+        data = resp.read().decode()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertLess(headers_after, 3.5, "the stream starts after the 2 s hold, not after the 5 s prefill")
+        self.assertIn("Hello", data)
+        self.assertIn("[DONE]", data)
+
+    def test_16_status_describes_memory(self):
+        info = self.get("/tf/status")[1]["model_info"]
+        self.assertIn("repo", info)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

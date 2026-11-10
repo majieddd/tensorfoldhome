@@ -187,6 +187,9 @@ private struct ModelCard: View {
             Muted(text: "Switching restarts the model if it is loaded. TensorFold reads MLX builds only: 1.0 runs the exact Qwen3.5-2B and Qwen3.8-27B shapes it is qualified for; 0.6 also runs 9B Qwen3.5 MLX 4-bit builds (not qualified by the TensorFold project). GGUF files from LM Studio do not run here.", size: 12)
                 .padding(.top, 12)
 
+            Rectangle().fill(pal.lineSoft).frame(height: 1).padding(.top, 22)
+            ContextWindowEditor().padding(.top, 20)
+
             CardTitle(text: "Memory").padding(.top, 22)
             Muted(text: "A loaded model holds several GB of unified memory. The endpoint stays up either way and loads the model when a request arrives.", size: 13)
                 .padding(.top, 6).padding(.bottom, 10)

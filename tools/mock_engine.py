@@ -62,6 +62,12 @@ class H(BaseHTTPRequestHandler):
             json.dump({"body": body, "headers": dict(self.headers)}, fh)
         prompt_text = json.dumps(body.get("messages", ""))
         slow = "SLOW" in prompt_text
+        overflow = "OVERFLOW" in prompt_text
+        err = {"message": "This server's maximum context length is 65536 tokens, but the rendered prompt has 70123 tokens and "
+                          "leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.",
+               "type": "invalid_request_error", "param": "messages", "code": "context_length_exceeded"}
+        if overflow and not body.get("stream"):  # TensorFold 1.2: a plain 400
+            return self.send_json(400, {"error": err})
         n_prompt = 40
         TOTALS["prompt"] += n_prompt
         TOTALS["gen"] += len(WORDS)
@@ -88,6 +94,14 @@ class H(BaseHTTPRequestHandler):
 
         words = WORDS * (25 if slow else 1)
         try:
+            emit({"id": "c1", "object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]})
+            if overflow:  # TensorFold 1.2 streaming: HTTP 200 already sent, then an error event
+                emit({"error": err})
+                emit(b"[DONE]")
+                self.wfile.write(b"0\r\n\r\n")
+                return
+            if "PREFILL5" in prompt_text:
+                time.sleep(5)
             for i, w in enumerate(words):
                 emit({"id": "c1", "object": "chat.completion.chunk", "model": body.get("model"),
                       "choices": [{"index": 0, "delta": {"content": w}, "finish_reason": None}]})

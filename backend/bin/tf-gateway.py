@@ -177,6 +177,7 @@ def engine_facts():
         "weights_gib": r"([\d.]+) GiB of weights kept resident",
         "prompt_cache_gib": r"prompt cache(?: up to)? ([\d.]+) GiB",
         "concurrency": r"up to (\d+) requests share each round",
+        "kv_kb_per_token": r"then ([\d.]+) KB a token",
         "memory_budget_gib": r"memory budget ([\d.]+) GiB",
         "decoder": r"(lane decoder without tensor units|native tensor-unit kernels|lane kernels)",
     }
@@ -235,9 +236,27 @@ def _model_details(repo):
         except OSError:
             pass
     quant = f"MLX {q['bits']}-bit, group {q.get('group_size', '?')}" if q.get("bits") else "unquantized"
-    return {"repo": repo, "cached": True, "revision": snap[:12], "quantization": quant, "model_type": cfg.get("model_type", ""),
+    info = {"repo": repo, "cached": True, "revision": snap[:12], "quantization": quant, "model_type": cfg.get("model_type", ""),
             "layers": text.get("num_hidden_layers"), "hidden_size": text.get("hidden_size"),
             "max_position_embeddings": text.get("max_position_embeddings"), "size_gb": round(size / 1e9, 2)}
+    # what the app's context estimate needs. TensorFold grows a conversation's KV cache as it fills (it reserves no
+    # window up front), so the estimate is for one conversation at a full window.
+    if text.get("max_position_embeddings"):
+        info["max_context"] = int(text["max_position_embeddings"])
+    layers = int(text.get("num_hidden_layers") or 0)
+    kinds = text.get("layer_types")
+    if isinstance(kinds, list) and kinds:
+        full = sum(1 for k in kinds if "full" in str(k))
+    elif text.get("full_attention_interval"):
+        full = layers // int(text["full_attention_interval"])
+    else:
+        full = layers
+    kv_heads = int(text.get("num_key_value_heads") or text.get("num_attention_heads") or 0)
+    head_dim = int(text.get("head_dim") or (int(text.get("hidden_size") or 0) // max(1, int(text.get("num_attention_heads") or 1))))
+    if full and kv_heads and head_dim:
+        info["kv_bytes_per_token"] = 2 * full * kv_heads * head_dim * 2
+    info.update(weights_bytes=size, runtime_bytes=1_500_000_000, reserves_context=False)
+    return info
 
 
 def launchd_engine():
@@ -339,6 +358,9 @@ def scan_event(ev, live):
         live.finish = (ev.get("response") or {}).get("status") or etype.split(".")[-1]
 
 
+OVERFLOW_FILE = os.path.join(STATE, "overflows.json")
+
+
 class Recorder:
     """Live requests, the last 200 finished ones, totals, a 2-minute history and the per-version perf log."""
 
@@ -350,6 +372,26 @@ class Recorder:
                        "prefill_s": 0.0, "decode_s": 0.0}
         self.history = {k: collections.deque(maxlen=HISTORY) for k in ("t", "tok_s", "prefill_tok_s", "inflight")}
         self.last_prefill = None
+        saved = read_json(OVERFLOW_FILE, {})
+        self.overflows = saved if isinstance(saved, dict) and "count" in saved else {"count": 0}
+
+    def overflow(self, live, context, tokens):
+        """A request that did not fit the context window: counted, with the largest size seen, for the app's hint."""
+        with self.lock:
+            o = self.overflows
+            o["count"] = o.get("count", 0) + 1
+            o.update(last_at=time.time(), last_estimate=tokens, context_at_last=context, client=live.client if live else None)
+            if o.get("largest_context") != context:  # sizes seen at an older window say nothing about this one
+                o["largest_context"], o["largest_estimate"] = context, tokens
+            elif tokens and tokens > (o.get("largest_estimate") or 0):
+                o["largest_estimate"] = tokens
+            snapshot = dict(o)
+        try:
+            os.makedirs(STATE, exist_ok=True)
+            with open(OVERFLOW_FILE, "w") as fh:
+                json.dump(snapshot, fh)
+        except OSError:
+            pass
 
     def begin(self, live):
         with self.lock:
@@ -373,7 +415,8 @@ class Recorder:
             decode = (output - 1) / (end - live.first_token)
         read = max(0, (prompt or 0) - cached)
         prefill = read / prefill_s if prefill_s and read else (read / ttft if ttft and read else None)
-        finish = "error" if error else "cancel" if cancelled else (live.finish or ("stop" if 200 <= status < 300 else "error"))
+        finish = "overflow" if getattr(live, "overflowed", False) else "error" if error else "cancel" if cancelled else \
+            (live.finish or ("stop" if 200 <= status < 300 else "error"))
         rec = {
             "id": live.id, "time": end, "start": live.start, "path": live.path, "client": live.client, "stream": live.stream,
             "status": status, "finish": finish, "error": error,
@@ -386,7 +429,7 @@ class Recorder:
             "model": cfg["model"]["key"], "model_label": cfg["model"]["label"], "engine": cfg["model"]["engine"],
             "engine_version": version,
         }
-        if prompt is None and output is None and finish != "error":
+        if prompt is None and output is None and finish not in ("error", "overflow"):
             return rec  # nothing generated (a probe, or a request without a body we understand)
         with self.lock:
             self.requests.appendleft(rec)
@@ -627,6 +670,7 @@ def status():
         "endpoint_at_login": cfg["endpoint_at_login"], "share": cfg["share"], "require_key": cfg["require_key"],
         "key_set": bool(api_key()), "listening": LISTEN_HOST, "auto_update": cfg["auto_update"], "update": update,
         "shared_defaults": defaults.get("defaults") if isinstance(defaults, dict) else None,
+        "overflows": dict(RECORDER.overflows),
     }
 
 
@@ -722,6 +766,8 @@ class Handler(BaseHTTPRequestHandler):
 
         wake = self.command in WAKE_METHODS
         live = Live(path, client_name(self.headers.get("User-Agent")), stream) if wake else None
+        if live and isinstance(doc, dict):
+            live.estimate = estimate_tokens(doc)
         if live:
             RECORDER.begin(live)
             ENGINE.touch()
@@ -741,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
                     RECORDER.finish(live, 503, cfg, ENGINE.version, error="engine failed to start")
                     live = None
                     return self.send_json(503, {"error": {"message": f"TensorFold engine failed to start; see {ROOT}/logs/engine.log"}})
-            status_code, cancelled, error = self.proxy(cfg["engine_port"], body, live, strip_usage)
+            status_code, cancelled, error = self.proxy(cfg["engine_port"], body, live, strip_usage, cfg)
             if live:
                 RECORDER.finish(live, status_code, read_config(), ENGINE.version, error=error, cancelled=cancelled)
                 live = None
@@ -776,8 +822,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"shared": bool(d), "defaults": d})
         return self.send_json(404, {"error": {"message": f"unknown path {path}"}})
 
-    def proxy(self, port, body, live, strip_usage):
-        """Forward to the engine and stream the reply back. Returns (status, cancelled, error)."""
+    def send_overflow(self, live, cfg, err):
+        if live:
+            live.overflowed = True
+        RECORDER.overflow(live, cfg["context"], overflow_tokens(err, live))
+        self.send_json(400, overflow_error(cfg, err, live))
+        return 400, False, "context overflow"
+
+    def proxy(self, port, body, live, strip_usage, cfg):
+        """Forward to the engine and stream the reply back. Returns (status, cancelled, error).
+
+        A prompt longer than the context window comes back as HTTP 400 context_length_exceeded, or, in a stream, as an
+        error event right after the first chunk with HTTP 200 already sent. The gateway holds a stream's start until it
+        is clearly not an overflow (its first real output, any later event, or 2 s) and answers an overflow with the
+        400, which clients act on (Hermes compresses the conversation and retries). Overflows are counted for the app."""
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_BY_HOP}
         headers["Content-Length"] = str(len(body))
         upstream = http.client.HTTPConnection("127.0.0.1", port, timeout=3600)
@@ -787,56 +845,115 @@ class Handler(BaseHTTPRequestHandler):
             resp = upstream.getresponse()
             status_code = resp.status
             streaming = resp.getheader("Content-Length") is None
-            self.send_response(resp.status, resp.reason)
-            for k, v in resp.getheaders():
-                if k.lower() not in HOP_BY_HOP:
-                    self.send_header(k, v)
             if not streaming:
                 data = resp.read()
-                if live:
-                    try:
-                        scan_event(json.loads(data), live)
-                    except ValueError:
-                        pass
+                doc = None
+                try:
+                    doc = json.loads(data)
+                except ValueError:
+                    pass
+                if isinstance(doc, dict) and is_overflow(doc.get("error")):
+                    return self.send_overflow(live, cfg, doc["error"])
+                if live and doc is not None:
+                    scan_event(doc, live)
+                self.send_response(resp.status, resp.reason)
+                for k, v in resp.getheaders():
+                    if k.lower() not in HOP_BY_HOP:
+                        self.send_header(k, v)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
                 return status_code, False, None if status_code < 400 else f"HTTP {status_code}"
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            buf, skip_blank = b"", False
-            while True:
-                chunk = resp.read1(65536)
-                if not chunk:
-                    break
-                buf += chunk
-                out = []
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    if skip_blank and line.strip() == b"":
+            gate = threading.Lock()
+            held, committed = [], [False]
+
+            def commit():  # under gate: send the headers and whatever was held back
+                if committed[0]:
+                    return
+                committed[0] = True
+                self.send_response(resp.status, resp.reason)
+                for k, v in resp.getheaders():
+                    if k.lower() not in HOP_BY_HOP:
+                        self.send_header(k, v)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                if held:
+                    data = b"".join(held)
+                    held.clear()
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+                self.wfile.flush()
+
+            def timed_commit():
+                with gate:
+                    try:
+                        commit()
+                    except OSError:
+                        pass
+
+            timer = threading.Timer(2.0, timed_commit)
+            timer.daemon = True
+            timer.start()
+            buf, skip_blank, seen_data = b"", False, 0
+            try:
+                while True:
+                    chunk = resp.read1(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    out, trigger = [], False
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if skip_blank and line.strip() == b"":
+                            skip_blank = False
+                            continue
                         skip_blank = False
-                        continue
-                    skip_blank = False
-                    if line.startswith(b"data: {") and live is not None:
-                        try:
-                            ev = json.loads(line[6:])
-                        except ValueError:
-                            ev = None
-                        if ev is not None:
-                            scan_event(ev, live)
-                            if strip_usage and ev.get("choices") == [] and "usage" in ev:
-                                skip_blank = True
-                                continue
-                    out.append(line + b"\n")
-                if out:
-                    payload = b"".join(out)
-                    self.wfile.write(b"%x\r\n%s\r\n" % (len(payload), payload))
-                    self.wfile.flush()
-            if buf:
-                self.wfile.write(b"%x\r\n%s\r\n" % (len(buf), buf))
-            self.wfile.write(b"0\r\n\r\n")
-            self.wfile.flush()
-            return status_code, False, None
+                        if line.startswith(b"data: {"):
+                            try:
+                                ev = json.loads(line[6:])
+                            except ValueError:
+                                ev = None
+                            if isinstance(ev, dict):
+                                if is_overflow(ev.get("error")):
+                                    with gate:
+                                        if not committed[0]:  # nothing reached the client yet: a clean 400
+                                            timer.cancel()
+                                            committed[0] = True
+                                            return self.send_overflow(live, cfg, ev["error"])
+                                    if live:  # already streaming: keep the event, standard and counted
+                                        live.overflowed = True
+                                    RECORDER.overflow(live, cfg["context"], overflow_tokens(ev["error"], live))
+                                    line = b"data: " + json.dumps(overflow_error(cfg, ev["error"], live)).encode()
+                                elif live is not None:
+                                    scan_event(ev, live)
+                                if strip_usage and ev.get("choices") == [] and "usage" in ev:
+                                    skip_blank = True
+                                    continue
+                                seen_data += 1
+                                delta = ((ev.get("choices") or [{}])[0] or {}).get("delta") or {}
+                                if seen_data > 1 or any(delta.get(k) for k in ("content", "reasoning_content", "tool_calls")) \
+                                        or ev.get("type") not in (None, "message_start"):
+                                    trigger = True  # past the first chunk: not an overflow any more
+                        out.append(line + b"\n")
+                    with gate:
+                        if not committed[0]:
+                            held.extend(out)
+                            if trigger:
+                                commit()
+                            continue
+                    if out:
+                        data = b"".join(out)
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+                        self.wfile.flush()
+                with gate:
+                    timer.cancel()
+                    commit()
+                if buf:
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(buf), buf))
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+                return status_code, False, None
+            finally:
+                timer.cancel()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True  # client went away; closing upstream cancels the generation
             return status_code, True, None
@@ -850,6 +967,39 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = handle_any
+
+
+def estimate_tokens(doc):
+    """A rough prompt size (about 3.7 characters a token), used when an overflow error gives no count."""
+    try:
+        text = json.dumps(doc.get("messages", doc.get("input", "")), ensure_ascii=False) + json.dumps(doc.get("tools", ""), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return int(len(text) / 3.7)
+
+
+def is_overflow(err):
+    if not isinstance(err, dict):
+        return False
+    msg = str(err.get("message", "")).lower()
+    return err.get("code") == "context_length_exceeded" or "context overflow" in msg or "exceeds the context window" in msg
+
+
+def overflow_tokens(err, live):
+    """The prompt size the engine reported ("the rendered prompt has 6015 tokens"), else the gateway's estimate."""
+    m = re.search(r"has (\d+) tokens", str((err or {}).get("message", "")))
+    return int(m.group(1)) if m else getattr(live, "estimate", None)
+
+
+def overflow_error(cfg, err, live):
+    """The engine's own error when it is the OpenAI-standard one, which clients act on (Hermes compresses and retries)."""
+    if isinstance(err, dict) and err.get("code") == "context_length_exceeded":
+        return {"error": err}
+    tokens = overflow_tokens(err, live)
+    about = f" However, your messages resulted in about {tokens:,} tokens." if tokens else ""
+    return {"error": {"message": f"This model's maximum context length is {cfg['context']} tokens.{about} Please reduce the length "
+                                 f"of the messages, or raise the context window in TensorFold Home (Server > Model).",
+                      "type": "invalid_request_error", "param": "messages", "code": "context_length_exceeded"}}
 
 
 def apply_defaults(doc, path):

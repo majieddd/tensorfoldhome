@@ -316,6 +316,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         models.submenu = sub
         menu.addItem(models)
+        let ctx = NSMenuItem(title: "Context Window: \(ContextSize.label(model.context))", action: nil, keyEquivalent: "")
+        let csub = NSMenu()
+        for n in ContextSize.options(now: model.context, max: model.maxContext) {
+            var title = "\(ContextSize.label(n))  ·  \(Fmt.n(Double(n))) tokens"
+            if let e = model.memoryEstimate(context: n) {
+                title += "  ·  up to about \(Fmt.n(e.bytes / 1e9, 1)) GB" + (e.fit == .tooBig ? ", too much for this Mac" : "")
+            }
+            let it = NSMenuItem(title: title, action: model.contextChange == nil ? #selector(menuContext(_:)) : nil, keyEquivalent: "")
+            it.target = self
+            it.tag = n
+            it.state = n == model.context ? .on : .off
+            csub.addItem(it)
+        }
+        csub.addItem(.separator())
+        let custom = NSMenuItem(title: "Custom Size…", action: #selector(menuContextCustom), keyEquivalent: "")
+        custom.target = self
+        csub.addItem(custom)
+        ctx.submenu = csub
+        menu.addItem(ctx)
         menu.addItem(.separator())
         _ = add("Chat", #selector(menuChat))
         _ = add("Monitor", #selector(menuMonitor))
@@ -333,6 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func menuRestart() { model.restart() }
     @objc func menuMemory() { model.toggleMemory() }
     @objc func menuModel(_ sender: NSMenuItem) { if sender.tag < model.models.count { model.useModel(model.models[sender.tag]) } }
+    @objc func menuContext(_ sender: NSMenuItem) { model.changeContext(to: sender.tag, reload: true) }
+    @objc func menuContextCustom() { model.tab = .server; showWindow() }
     @objc func menuChat() { model.tab = .chat; showWindow() }
     @objc func menuMonitor() { model.tab = .monitor; showWindow() }
     @objc func menuWebUI() { model.openWebUI() }

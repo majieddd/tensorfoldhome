@@ -160,41 +160,16 @@ private struct SettingsCard: View {
 private struct ModelSettingsCard: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.pal) var pal
-    @State private var pick = 0
-    static let sizes = [16384, 32768, 65536, 131072, 262144]
 
     var body: some View {
-        let now = model.context
-        let sizes = (Self.sizes.contains(now) ? Self.sizes : (Self.sizes + [now]).sorted())
-        TitledCard(title: "Model settings", trailing: "now \(Fmt.k(Double(now))) tokens",
+        TitledCard(title: "Model settings", trailing: "now \(ContextSize.label(model.context)) tokens",
                    note: "What TensorFold starts the model with. They are kept in config.env, so tfctl, the menu bar and Hermes see the same values.") {
-            Text("Context length").outfit(13, .medium).foregroundStyle(pal.inkSoft).padding(.top, 16)
-            Muted(text: "How much one conversation can hold, prompt plus reply. A longer context keeps more of a long chat or a big file in view and reserves more memory.")
-                .padding(.top, 4).padding(.bottom, 10)
-            Segmented(options: sizes.map { ($0, Fmt.k(Double($0))) }, selection: $pick, fill: false)
-            Muted(text: hint(pick, now)).padding(.top, 10)
-            HStack(spacing: 10) {
-                Button("Save and restart") { model.setContext(pick, restart: true) }.buttonStyle(PrimaryButtonStyle())
-                Button("Save for next start") { model.setContext(pick, restart: false) }.buttonStyle(SecondaryButtonStyle())
-            }
-            .disabled(pick == now || pick == 0)
-            .padding(.top, 14)
+            ContextWindowEditor(showTitle: false).padding(.top, 14)
             Rectangle().fill(pal.lineSoft).frame(height: 1).padding(.vertical, 18)
             ToggleRow(title: "Think by default",
                       sub: "Whether a request that doesn't say opens a reasoning block. Off answers sooner. Chat's Sampling drawer sets it per message. Changing it restarts the model.",
                       isOn: Binding(get: { model.thinkingDefault }, set: { model.setThinkingDefault($0) }))
                 .padding(.top, -16)
         }
-        .onAppear { pick = now }
-        .onChange(of: now) { _, v in pick = v }
-    }
-
-    func hint(_ n: Int, _ now: Int) -> String {
-        guard n > 0 else { return "" }
-        var t = "\(Fmt.n(Double(n))) tokens"
-        if n < 64000 { t += ". Hermes refuses endpoints under 64,000 tokens" }
-        if n > 131072 { t += ". Long contexts need more memory; if the model fails to load, pick a smaller size" }
-        if n != now { t += ". Changes from \(Fmt.k(Double(now)))" }
-        return t + "."
     }
 }

@@ -28,14 +28,24 @@ tf06_healthy() {
   "$TF06_PY" -c 'import tensorfold.cli; from tensorfold.kernels import device; device.generation; device.tensor_units' 2>/dev/null &&
     "$ROOT/venv-tf06/bin/tensorfold" --version >/dev/null 2>&1
 }
+# Open WebUI loads the way `open-webui serve` loads it (FROM_INIT_PY picks the packaged frontend; 0.13 refuses to load
+# without WEBUI_SECRET_KEY), against a throwaway data folder so a failed check never migrates the real chats.
 webui_healthy() {
   [[ ${TF_UPDATE_SIMULATE_FAILURE:-} == webui ]] && return 1
-  "$WEBUI_PY" -c 'import open_webui.main' >/dev/null 2>&1; }
+  local scratch ok=1
+  scratch=$(mktemp -d)
+  (cd "$scratch" && FROM_INIT_PY=true WEBUI_SECRET_KEY=healthcheck WEBUI_AUTH=False DATA_DIR="$scratch/data" \
+    ENABLE_OLLAMA_API=False "$WEBUI_PY" -c 'import open_webui.main' >"$LOGS/webui-healthcheck.log" 2>&1) && ok=0
+  rm -rf "$scratch"
+  return $ok
+}
 
 # --- TensorFold 1.0.x (Homebrew) ---------------------------------------------------------------
 native_before=$(brew list --versions tensorfold 2>/dev/null | awk '{print $2}')
 brew update --quiet >/dev/null 2>&1
-if brew outdated --quiet tensorfold 2>/dev/null | grep -q tensorfold; then
+# brew outdated exits 1 exactly when something is outdated, so it must not sit in a pipeline under pipefail
+outdated=$(brew outdated --quiet tensorfold 2>/dev/null || true)
+if grep -q tensorfold <<<"$outdated"; then
   latest=$(brew info --json=v2 tensorfold 2>/dev/null | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])' 2>/dev/null)
   if [[ $mode == --check ]]; then
     results+=("tensorfold (brew)|$native_before|$latest|available")

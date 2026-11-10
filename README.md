@@ -17,8 +17,8 @@ browser or Terminal for any of it.
 |---|---|
 | **Chat** | Streaming answers with Markdown (headings, lists, tables, code blocks with a copy button). A collapsible "Thought for 2.1 s" block shows the model's reasoning. Each answer shows tokens, tok/s and how many of TensorFold's drafted tokens were kept. You can attach a text file (or drop one), start a New chat with Undo, and save the chat as Markdown. The **Sampling** drawer sets thinking (off / low / medium / high), temperature, top-p, top-k, max tokens and seed, and can share them with other apps. The conversation stays on this Mac. |
 | **Monitor** | Live meters, refreshed every second. Model state (idle, loading, reading the prompt, generating, queued, error), decode and prefill speed, GPU load, unified memory and memory pressure, the engine's own memory against its budget, drafts kept, thermal state, CPU, disk. Below them: context fill, recent requests from every client (Hermes, Open WebUI, this app, scripts), the prompt cache, and **performance by TensorFold version**. |
-| **About** | The loaded model and engine (format, decoder, context, drafts, weights in memory, memory budget, load time) and this Mac's chip, GPU, cores, memory and Metal's GPU memory limit. **Connect your tools** has copy-ready OpenAI and Anthropic base URLs and a ready-made Hermes config. Also the theme, the context length (16K to 256K) and whether the model thinks by default. |
-| **Server** | **Start**, **Stop**, **Restart**, **Free memory** and **Copy API URL**. Pick the model, or add one from Hugging Face. Choose the memory mode: keep the model loaded, unload it when idle after N minutes, or load it on the first request. **Serve the model on the network** with an optional **API key**. Options, **TensorFold updates**, **TensorFold Home updates**, and the engine, endpoint, update, Open WebUI and app logs. |
+| **About** | The loaded model and engine (format, decoder, context, drafts, weights in memory, memory budget, load time) and this Mac's chip, GPU, cores, memory and Metal's GPU memory limit. **Connect your tools** has copy-ready OpenAI and Anthropic base URLs and a ready-made Hermes config. Also the theme, the context window and whether the model thinks by default. |
+| **Server** | **Start**, **Stop**, **Restart**, **Free memory** and **Copy API URL**. Pick the model, or add one from Hugging Face. Set the **context window** (presets or any size, with a memory estimate). Choose the memory mode: keep the model loaded, unload it when idle after N minutes, or load it on the first request. **Serve the model on the network** with an optional **API key**. Options, **TensorFold updates**, **TensorFold Home updates**, and the engine, endpoint, update, Open WebUI and app logs. |
 
 Light and dark themes (or follow macOS), the Outfit font and the emerald accent come from StrataHome. Closing the
 window keeps the app in the **menu bar**. The bolt there shows the state (filled when the model is loaded, outlined
@@ -83,7 +83,7 @@ TensorFold reads **MLX** checkpoints, not the GGUF files LM Studio uses. Two eng
 
 | Engine | Runs | Notes |
 |---|---|---|
-| TensorFold 1.0 (Homebrew) | the exact Qwen3.5-2B and Qwen3.8-27B shapes it is qualified for | has its own web dashboard; the 27B needs more than 24 GB |
+| TensorFold 1.x (Homebrew) | the exact Qwen3.5-2B and Qwen3.8-27B shapes it is qualified for (1.2.6 checked here) | has its own web dashboard; the 27B needs more than 24 GB |
 | TensorFold 0.6 (Python/MLX) | also 9B Qwen3.5 MLX 4-bit builds | not qualified by the TensorFold project; its M5 kernels don't compile on macOS 26.2, so `tf06_no_tensor_units.py` runs it on the M1–M4 decoder |
 
 The default list:
@@ -115,6 +115,23 @@ is unchanged. They speed up replies that repeat their input (edits, refactors, q
 prose they add nothing. The Monitor's **Drafts kept** tile and the line under each chat answer show how much they
 helped.
 
+## Context window
+
+**Server > Model > Context window** (also on the About page and in the menu-bar menu) sets how much one conversation
+can hold. Pick a preset, which goes up to what the model was built for (256K for most Qwen3.5 builds, 1M for Qwythos),
+or type any size (`96K`, `100000`, `1M`). TensorFold takes the memory as a conversation fills (32 KB a token for a 9B
+Qwen3.5, which the engine reports at start), so a bigger window costs nothing until a conversation is that long. Under
+the control the app shows how much a full window takes against the GPU memory macOS allows this Mac (17.8 GB on a 24 GB
+M5), and warns before a size that won't fit.
+
+**Apply** reloads the model at the new size and watches it come up. If it doesn't load, the previous size comes back and
+is reloaded, with the engine's error in the message. Hermes reads the new size from the endpoint by itself.
+
+When a request is longer than the window, the endpoint answers with the standard `context_length_exceeded` error, also
+for a streamed request (TensorFold reports that one inside a stream that has already started, which clients don't act
+on), so Hermes compresses the conversation and tries again. The endpoint counts these, and the context window card says
+how many requests didn't fit, how big the largest was, and offers the size that would have held it.
+
 ## What else it does
 
 | | |
@@ -122,7 +139,7 @@ helped.
 | **Memory modes** | Keep the model loaded, unload it after N idle minutes (default 30), or load it only on the first request. The endpoint stays up either way. |
 | **Serving on the network** | Off by default. On, the endpoint listens on `0.0.0.0`, and other computers reach it at the address shown (e.g. `http://192.168.1.15:8484/v1`). **Require an API key** is a second, optional switch: **Generate** writes a random key; other computers send it as `Authorization: Bearer <key>` or `x-api-key`. Requests from this Mac never need it. If macOS asks whether Python may accept incoming connections, allow it. |
 | **Shared sampling** | "Use for other apps too" in the Sampling drawer fills those settings into any request that leaves them out, so Hermes or Open WebUI get the same thinking level and temperature. |
-| **TensorFold updates** | Daily at 04:30 (or at the next wake), and with **Check now** / **Update now**: TensorFold 1.0 from Homebrew, TensorFold 0.6 from its `python-0.6` branch (never moved to 1.0 inside its environment), Open WebUI from PyPI. Each update is checked (imports, CLI, an engine restart and health check). A failed TensorFold 0.6 or Open WebUI update is put back to the version you had. A busy model isn't restarted. |
+| **TensorFold updates** | Daily at 04:30 (or at the next wake), and with **Check now** / **Update now**: TensorFold 1.x from Homebrew, TensorFold 0.6 from its `python-0.6` branch (never moved to 1.x inside its environment), Open WebUI from PyPI. Each update is checked (imports, CLI, an engine restart and health check). A failed TensorFold 0.6 or Open WebUI update is put back to the version you had. A busy model isn't restarted. Open WebUI is checked the way `open-webui serve` loads it, against a throwaway data folder, so a failed check never touches your chats. |
 | **TensorFold Home updates** | Checks this repository's releases on startup and every six hours. **Update** downloads `TensorFoldHome.zip` and checks its SHA-256 against the digest GitHub publishes for that asset. A download that doesn't match, or a release with no digest, is refused. The verified app goes in when you quit, and the version you had is kept in `updates/app-before-<version>`. |
 | **Performance by TensorFold version** | Prefill and decode averages per TensorFold version and model, weighted by tokens, newest first, with the running version compared to the one before. It answers "is this update slower for me". |
 | **Light on resources** | The meters are read every second while the window is open. Closed to the menu bar, the app checks the endpoint every 5 seconds and reads no meters. |
@@ -131,7 +148,7 @@ helped.
 
 1. Download `TensorFoldHome.zip` from the [latest release](https://github.com/majieddd/tensorfoldhome/releases/latest), unzip it and move **TensorFold Home** to Applications.
 2. The app isn't notarised, so the first time, **right-click it and choose Open**, then Open again. Or check the zip against the SHA-256 in the release notes, or build it yourself (below).
-3. On a Mac without TensorFold yet, go to **Server > Set up**. It needs [Homebrew](https://brew.sh) and installs TensorFold 1.0, TensorFold 0.6 in its own Python environment, the endpoint and the daily updater (and Open WebUI if you tick it). Then press **Start**; the first start downloads the model (about 5 GB for a 9B).
+3. On a Mac without TensorFold yet, go to **Server > Set up**. It needs [Homebrew](https://brew.sh) and installs TensorFold 1.x, TensorFold 0.6 in its own Python environment, the endpoint and the daily updater (and Open WebUI if you tick it). Then press **Start**; the first start downloads the model (about 5 GB for a 9B).
 
 Requirements: an Apple-silicon Mac with macOS 14 or newer. The 9B models were tested on 24 GB; the 2B model needs far less.
 
@@ -154,8 +171,8 @@ builds into `dist/dev/`, so a running copy is never in the way. `./build.sh --in
 "dist/TensorFold Home.app/Contents/MacOS/TensorFoldHome" --selftest
 ```
 
-This runs 34 checks: Markdown parsing, version comparison, the SHA-256 gate on an app update, config.env and
-models.conf edits, how attachments are fenced, the run states and the status pill, and this Mac's meters. If an
+This runs 41 checks: Markdown parsing, version comparison, the SHA-256 gate on an app update, config.env and
+models.conf edits, context sizes (parsing "96K", the presets, the suggested size and the memory estimate), how attachments are fenced, the run states and the status pill, and this Mac's meters. If an
 endpoint is running, it also reads its status (it doesn't send requests). Results go to
 `~/Library/Application Support/TensorFoldHome/logs/selftest.txt`; exit code 0 means everything passed.
 
@@ -163,10 +180,12 @@ endpoint is running, it also reads its status (it doesn't send requests). Result
 python3 -m unittest discover -s tools -p test_gateway.py -v
 ```
 
-runs 12 tests of the endpoint against a mock engine on spare ports, with no model and no GPU: `/v1/models`, "a probe
+runs 16 tests of the endpoint against a mock engine on spare ports, with no model and no GPU: `/v1/models`, "a probe
 doesn't wake the model", wake on demand and model-name rewriting, streams with and without usage, the Anthropic API,
 shared sampling, the per-request stats, totals, history and per-version performance log, live state and client
-disconnects, concurrent requests, idle unload and "keep loaded", and the API key on the network.
+disconnects, concurrent requests, idle unload and "keep loaded", the API key on the network, a history that starts with an
+assistant turn, an over-long prompt answered with `context_length_exceeded` (plain and streamed) and counted, and
+headers sent early for a slow prefill.
 
 `--update-check` runs the real TensorFold Home release check and writes `logs/update-check.txt`; `--update-download`
 also downloads the release's zip and verifies its SHA-256, app identity and version, staging nothing.
